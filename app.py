@@ -17,7 +17,7 @@ from sklearn.multiclass import OneVsRestClassifier
 from xgboost import XGBClassifier
 
 # load embedding model
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embedder = None
 
 # ---------- helper functions ----------
 
@@ -47,12 +47,22 @@ def section_weight(chunk):
     return 2.0 if any(k in chunk.lower() for k in keywords) else 1.0
 
 
+def get_embedder():
+    global embedder
+    if embedder is None:
+        from sentence_transformers import SentenceTransformer
+        embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    return embedder
+
+
 def doc_to_vector(text):
+    model = get_embedder()
     chunks = chunk_text(text)
-    embeddings = embedder.encode(chunks)
+    embeddings = model.encode(chunks)
     weights = np.array([section_weight(c) for c in chunks])
     weights = weights / weights.sum()
     return (embeddings * weights[:, None]).sum(axis=0)
+
 
 
 def detect_features(text):
