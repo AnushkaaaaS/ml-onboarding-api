@@ -56,12 +56,24 @@ def get_embedder():
 
 
 def doc_to_vector(text):
-    model = get_embedder()
+    from sentence_transformers import SentenceTransformer
+    import gc
+
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+
     chunks = chunk_text(text)
     embeddings = model.encode(chunks)
+
     weights = np.array([section_weight(c) for c in chunks])
     weights = weights / weights.sum()
-    return (embeddings * weights[:, None]).sum(axis=0)
+
+    result = (embeddings * weights[:, None]).sum(axis=0)
+
+    # free memory immediately
+    del model
+    gc.collect()
+
+    return result
 
 
 
