@@ -1,23 +1,25 @@
 from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 import io
 from docx import Document
 import PyPDF2
 import joblib
-
-
-
-
-# ================= ML LOGIC START =================
-
 import numpy as np
-import json
-from sentence_transformers import SentenceTransformer
-from sklearn.preprocessing import MultiLabelBinarizer
-from sklearn.multiclass import OneVsRestClassifier
-from xgboost import XGBClassifier
+import gc
 
-# load embedding model
+from sentence_transformers import SentenceTransformer
+
+# ================= ML LOGIC =================
+
+# lighter embedding model for deployment
 embedder = None
+
+def get_embedder():
+    global embedder
+    if embedder is None:
+        embedder = SentenceTransformer("paraphrase-MiniLM-L3-v2")
+    return embedder
+
 
 # ---------- helper functions ----------
 
@@ -47,19 +49,9 @@ def section_weight(chunk):
     return 2.0 if any(k in chunk.lower() for k in keywords) else 1.0
 
 
-def get_embedder():
-    global embedder
-    if embedder is None:
-        from sentence_transformers import SentenceTransformer
-        embedder = SentenceTransformer("all-MiniLM-L6-v2")
-    return embedder
-
-
 def doc_to_vector(text):
-    from sentence_transformers import SentenceTransformer
-    import gc
 
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = get_embedder()
 
     chunks = chunk_text(text)
     embeddings = model.encode(chunks)
@@ -67,14 +59,11 @@ def doc_to_vector(text):
     weights = np.array([section_weight(c) for c in chunks])
     weights = weights / weights.sum()
 
-    result = (embeddings * weights[:, None]).sum(axis=0)
+    vector = (embeddings * weights[:, None]).sum(axis=0)
 
-    # free memory immediately
-    del model
     gc.collect()
 
-    return result
-
+    return vector
 
 
 def detect_features(text):
@@ -125,20 +114,22 @@ def expand_tasks(category, features):
     return tasks
 
 
-# ---- dummy trained model placeholders (REPLACE with your loaded ones) ----
-# IMPORTANT: you must load the trained mlb & ovr here if you saved them
+# load trained models
 mlb = joblib.load("mlb.joblib")
 ovr = joblib.load("ovr_model.joblib")
 
 
 def predict_task_categories(vector, threshold=0.4):
+
     probs = ovr.predict_proba(vector.reshape(1, -1))[0]
+
     selected = [mlb.classes_[i] for i, p in enumerate(probs) if p >= threshold]
 
     if not selected:
         selected = [mlb.classes_[np.argmax(probs)]]
 
     confidence = {mlb.classes_[i]: float(probs[i]) for i in range(len(probs))}
+
     return selected, confidence
 
 
@@ -152,17 +143,24 @@ def clarification_tasks(missing):
 
 
 def generate_onboarding_plan(document_text):
+
     _, missing = validate_document(document_text)
+
     features = detect_features(document_text)
 
     vector = doc_to_vector(document_text)
+
     categories, confidence = predict_task_categories(vector)
 
     plan = []
 
     clarify = clarification_tasks(missing)
+
     if clarify:
-        plan.append({"phase": "Clarification", "tasks": clarify})
+        plan.append({
+            "phase": "Clarification",
+            "tasks": clarify
+        })
 
     for cat in categories:
         plan.append({
@@ -178,22 +176,47 @@ def generate_onboarding_plan(document_text):
         "missing_sections": missing
     }
 
-# ================= ML LOGIC END =================
+
+# ================= FASTAPI =================
 
 app = FastAPI()
 
+# enable UI integration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 def extract_text(file: UploadFile):
+
     content = file.file.read()
+
     if file.filename.endswith(".docx"):
         doc = Document(io.BytesIO(content))
         return "\n".join(p.text for p in doc.paragraphs)
+
     elif file.filename.endswith(".pdf"):
         reader = PyPDF2.PdfReader(io.BytesIO(content))
         return "".join(page.extract_text() or "" for page in reader.pages)
+
     else:
         return content.decode("utf-8")
 
+
+@app.get("/")
+def home():
+    return {"message": "ML Onboarding API running"}
+
+
 @app.post("/generate-plan")
 async def generate_plan(file: UploadFile = File(...)):
+
     text = extract_text(file)
-    return generate_onboarding_plan(text)
+
+    result = generate_onboarding_plan(text)
+
+    return result
